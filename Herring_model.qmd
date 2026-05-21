@@ -1,0 +1,109 @@
+---
+title: "Herring_model"
+editor: visual
+---
+
+```{r}
+#| label: Herring Model
+#| message: false
+#| warning: false
+
+# -----------------------------------------------------------------------------
+
+# All functions are called with package::function() to avoid conflicts between different packages containing identical functions names.
+# All packages used in the code is in the references at the end. 
+# -----------------------------------------------------------------------------
+
+# Parameters 
+year_min <- 1950L      # Start year
+year_max <- 2019L      # End year
+doy_wrap_start <- 300  # Start of seasonal day of year (DOY)
+
+# Function for wrapping DOY across the year boundary
+wrap_doy <- function(doy, wrap_start = 300, days_in_year = 365) {
+  # Converts DOY >= 300 to negative values 
+  dplyr::if_else(doy >= wrap_start, doy - days_in_year, doy)
+}
+
+# Input data from targets pipeline
+# See the other GitHub URL for access to the input data (Awaiting approval for publication as of 1. June 2026)
+ana <- targets::tar_read(herring_model_df)
+
+# Selects and formats variables used in the model
+dat <- ana |>
+  dplyr::transmute(
+    year = as.integer(.data$year),          
+    doy = as.numeric(.data$doy),
+    lat = as.numeric(.data$lat),
+    spawn = as.integer(.data$maturity_bin),
+    gear = .data$gear,
+    age = as.numeric(.data$age),
+    length = as.numeric(.data$length),
+    ssb_tonnes = as.numeric(.data$ssb_tonnes),
+    nao_index = as.numeric(.data$nao_index)
+  ) |>
+  dplyr::filter(
+    .data$year >= year_min,
+    .data$year <= year_max,
+    # Keeps only data withing the winter season (DOY >= 300 or DOY <= 120)
+    .data$doy >= doy_wrap_start | .data$doy <= 120,
+    # Binary response
+    .data$spawn %in% c(0L, 1L)
+  ) |>
+  dplyr::mutate(
+    # Creates continous seasonal structure
+    doy_season = wrap_doy(.data$doy, wrap_start = doy_wrap_start),
+    year_f = factor(.data$year),
+    gear_f = factor(.data$gear),
+    log_ssb = log10(.data$ssb_tonnes),
+    # Z-scaled for standardisation
+    log_ssb_z = as.numeric(scale(.data$log_ssb)),
+    nao_z = as.numeric(scale(.data$nao_index))
+  ) |>
+  dplyr::filter(
+    stats::complete.cases(
+      # Removes observiations with missing model variables 
+      .data$spawn,
+      .data$doy_season,
+      .data$lat,
+      .data$age,
+      .data$length,
+      .data$year_f,
+      .data$gear_f,
+      .data$log_ssb_z,
+      .data$nao_z
+    )
+  )
+
+# Herring model
+Herring_mod <- mgcv::bam(
+  spawn ~ doy_season +
+    s(lat, k = 5) +
+    te(age, length, k = c(4, 4)) +
+    s(year_f, bs = "re") +
+    s(log_ssb_z, k = 3) +
+    nao_z +
+    gear_f,
+  family = stats::binomial(link = "logit"),
+  data = dat,
+  method = "fREML",
+  discrete = TRUE
+)
+
+
+# ----------------------------------------------------------------------------
+# References for packages:
+
+# dplyr:
+#    Wickham H, Francois R, Henry L, Muller K, Vaughan D (2026). _dplyr: A Grammar of Data Manipulation_. doi:10.32614/CRAN.package.dplyr. <https://doi.org/10.32614/CRAN.package.dplyr>, R package version 1.2.1, <https://CRAN.R-project.org/package=dplyr>.
+
+# targets:
+#    Landau, W. M., (2021). The targets R package: a dynamic Make-like function-oriented pipeline toolkit for reproducibility and high-performance computing. Journal of Open Source Software, 6(57),2959,https://doi.org/10.21105/joss.02959
+
+# stats:
+#    R Core Team (2025). _R: A Language and Environment for Statistical Computing_.R Foundation for Statistical Computing, Vienna, Austria. <https://www.R-project.org/>.
+
+# mgcv:                                                                                  
+#    Wood, S.N. (2017) Generalized Additive Models: An Introduction with R (2nd edition). Chapman and Hall/CRC.
+
+```
